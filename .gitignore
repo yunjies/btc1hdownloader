@@ -2,3 +2,4 @@ run_docker.sh
 run_docker.sh
 run.sh
 build.sh
+logs/cron.log
