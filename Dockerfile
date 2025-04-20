@@ -11,17 +11,18 @@ COPY main.py .
 RUN apt-get update && apt-get install -y cron
 RUN pip install python-binance pandas
 
-# 添加 cron 任务，每小时执行一次
+# 添加 cron 任务
 RUN echo "0 * * * * python /app/main.py >> /var/log/cron.log 2>&1" > /etc/cron.d/my-cron-job
 
 # 赋予 cron 任务执行权限
 RUN chmod 0644 /etc/cron.d/my-cron-job
 
-# 创建日志文件
-RUN touch /var/log/cron.log
+# **关键步骤**：在卷映射前创建日志文件（此时 /var/log 还是容器内的目录）
+RUN mkdir -p /var/log  # 确保目录存在（部分镜像可能没有默认创建）
+RUN touch /var/log/cron.log  # 创建日志文件
 
 # 创建保存数据的目录
 RUN mkdir -p /data
 
-# 启动 cron
-CMD cron && tail -f /var/log/cron.log    
+# 启动 cron 并持续输出日志（即使文件被卷映射覆盖，tail 会监听新内容）
+CMD cron && tail -f /var/log/cron.log
