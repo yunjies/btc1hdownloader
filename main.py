@@ -4,9 +4,11 @@ from binance.client import Client
 import pandas as pd
 import datetime
 from telegram_log_handler import TelegramHandler
+from feishu_log_handler import FeishuHandler
+import prediction
 
 # 自定义 Telegram 日志过滤器
-class TelegramFilter(logging.Filter):
+class RemoteMessageFilter(logging.Filter):
     def filter(self, record):
         # 这里可以根据需求修改过滤规则
         # 示例：只允许包含 'error' 或 '重要' 关键字的日志通过
@@ -18,7 +20,7 @@ class TelegramFilter(logging.Filter):
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# 配置日志输出到标准输出和 Telegram
+# 配置日志输出到标准输出和 Telegram 和飞书
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -29,9 +31,17 @@ logging.basicConfig(
 
 if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
     telegram_handler = TelegramHandler(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-    telegram_handler.addFilter(TelegramFilter())
+    telegram_handler.addFilter(RemoteMessageFilter())
     logging.getLogger().addHandler(telegram_handler)
 
+# 飞书 配置
+FEISHU_APP_ID = os.getenv('FEISHU_APP_ID')
+FEISHU_APP_SECRET = os.getenv('FEISHU_APP_SECRET')
+
+if FEISHU_APP_ID and FEISHU_APP_SECRET:
+    feishu_handler = FeishuHandler(FEISHU_APP_ID, FEISHU_APP_SECRET)
+    feishu_handler.addFilter(RemoteMessageFilter())
+    logging.getLogger().addHandler(feishu_handler)
 
 # 添加调试信息
 logging.info("开始执行 Python 脚本")
@@ -91,3 +101,7 @@ try:
 except Exception as e:
     logging.error(f"【通知】存数据时发生错误: {e}")
     raise    
+
+predict_result = prediction.do_prediction(combined_df)
+current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+logging.info(f"【通知】预测结果 {current_time}:\n{predict_result}")
