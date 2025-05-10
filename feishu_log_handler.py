@@ -13,18 +13,23 @@ def send_message_to_feishu(app_id, app_secret, message):
     message_url = "https://open.feishu.cn/open-apis/im/v1/messages"
     # 设置请求头
     headers = {
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
         "Authorization": f"Bearer {access_token}"
+    }
+    # 设置请求参数
+    params = {
+        "receive_id_type": "chat_id"
     }
     # 设置请求数据
     data = {
+        "receive_id": "oc_978e548c0a2bd0f8a27de6ab19626518",
         "msg_type": "text",
-        "content": {
+        "content": json.dumps({
             "text": message
-        }
+        })
     }
     # 发送消息
-    response = requests.post(message_url, headers=headers, json=data)
+    response = requests.post(message_url, headers=headers, params=params, json=data)
     return response.json()
 
 class FeishuHandler(logging.Handler):

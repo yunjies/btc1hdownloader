@@ -1,60 +1,93 @@
+import os
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+from tensorflow.keras.callbacks import ProgbarLogger
 
 
-# 数据准备与特征工程
-def prepare_data(data):
-    # 提取特征
-    features = data[['open', 'high', 'low', 'close', 'volume']]
-    # 计算简单的技术指标作为额外特征，如移动平均线
+# 禁用 GPU
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# 计算 CVD（累积成交量 delta）
+def calculate_cvd(data):
+    # 将字符串类型的 volume 和 taker_buy_base_asset_volume 转换为浮点数
+    data['volume'] = data['volume'].astype(float)
+    data['taker_buy_base_asset_volume'] = data['taker_buy_base_asset_volume'].astype(float)
+
+    # 主动买盘（Taker Buy）
+    taker_buy = data['taker_buy_base_asset_volume']
+    # 主动卖盘 = 总成交量 - 主动买盘
+    taker_sell = data['volume'] - taker_buy
+    # 单周期 Volume Delta = 主动买盘 - 主动卖盘
+    data['volume_delta'] = taker_buy - taker_sell
+    # 累积 CVD
+    data['cvd'] = data['volume_delta'].cumsum()
+    return data
+
+
+def prepare_data(data, future_hours=1):
+    # 计算 CVD 指标
+    data = calculate_cvd(data)
+
+    # 要转换为数值类型的列
+    columns_to_convert = ['open', 'high', 'low', 'close', 'volume', 'cvd']
+    for col in columns_to_convert:
+        data[col] = data[col].astype(float)
+
+    # 提取特征（包含 CVD），使用 .copy() 确保是独立的 DataFrame
+    features = data[columns_to_convert].copy()
+
+    # 计算其他技术指标（MA、RSI 等，可选）
     features['ma_5'] = features['close'].rolling(window=5).mean()
     features['ma_20'] = features['close'].rolling(window=20).mean()
+
+    # 计算 RSI（示例，可选）
+    delta = features['close'].diff()
+    up = delta.where(delta > 0, 0)
+    down = -delta.where(delta < 0, 0)
+    avg_up = up.rolling(14).mean()
+    avg_down = down.rolling(14).mean()
+    rs = avg_up / avg_down
+    features['rsi'] = 100 - (100 / (1 + rs))
+
     features = features.dropna()
 
-    # 目标变量：预测下一个时间步的最高价、最低价和收盘价
-    target_high = features['high'].shift(-1).dropna()
-    target_low = features['low'].shift(-1).dropna()
-    target_close = features['close'].shift(-1).dropna()
+    # 目标变量：预测未来 N 小时的收盘价
+    target_close = features['close'].shift(-future_hours).dropna()
+    features = features[:len(target_close)]
 
-    # 确保特征和目标变量长度一致
-    features = features[:len(target_high)]
-
-    # 数据归一化
+    # 数据归一化（包含 CVD 等新特征）
     scaler_features = MinMaxScaler()
-    scaler_high = MinMaxScaler()
-    scaler_low = MinMaxScaler()
     scaler_close = MinMaxScaler()
 
     scaled_features = scaler_features.fit_transform(features)
-    scaled_target_high = scaler_high.fit_transform(target_high.values.reshape(-1, 1))
-    scaled_target_low = scaler_low.fit_transform(target_low.values.reshape(-1, 1))
     scaled_target_close = scaler_close.fit_transform(target_close.values.reshape(-1, 1))
 
     # 划分训练集和测试集
-    X_train, X_test, y_train_high, y_test_high, y_train_low, y_test_low, y_train_close, y_test_close = train_test_split(
-        scaled_features, scaled_target_high, scaled_target_low, scaled_target_close, test_size=0.2, shuffle=False
+    X_train, X_test, y_train_close, y_test_close = train_test_split(
+        scaled_features, scaled_target_close, test_size=0.2, shuffle=False
     )
 
-    # 调整输入数据形状以适应 LSTM 模型
-    X_train = np.reshape(X_train, (X_train.shape[0], 1, X_train.shape[1]))
-    X_test = np.reshape(X_test, (X_test.shape[0], 1, X_test.shape[1]))
+    # 调整输入形状：(样本数, 时间步, 特征数)，这里时间步=1（单步预测）
+    X_train = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
+    X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
 
-    return X_train, X_test, y_train_high, y_test_high, y_train_low, y_test_low, y_train_close, y_test_close, scaler_high, scaler_low, scaler_close
-
+    return X_train, X_test, y_train_close, y_test_close, scaler_features, scaler_close
 
 # 构建 LSTM 模型
 def build_lstm_model(input_shape):
     model = Sequential()
-    model.add(LSTM(units=50, return_sequences=True, input_shape=input_shape))
-    model.add(LSTM(units=50))
+    model.add(Input(shape=input_shape))
+    model.add(LSTM(units=128, return_sequences=True))
+    model.add(Dropout(0.3))
+    model.add(LSTM(units=64))
+    model.add(Dropout(0.2))
     model.add(Dense(1))
     model.compile(optimizer='adam', loss='mean_squared_error')
     return model
-
 
 # 预测与结果反归一化
 def predict_and_inverse_transform(model, X_test, scaler):
@@ -62,81 +95,37 @@ def predict_and_inverse_transform(model, X_test, scaler):
     predictions = scaler.inverse_transform(predictions)
     return predictions
 
-
-# 区间交易法
-def range_trading_strategy(data):
-    # 假设已经有了历史的最高价和最低价数据
-    historical_high = data['high'].rolling(window=20).max()
-    historical_low = data['low'].rolling(window=20).min()
-
-    # 确定区间
-    upper_bound = historical_high
-    lower_bound = historical_low
-
-    # 生成交易信号
-    data['signal'] = 0
-    data.loc[data['close'] > upper_bound, 'signal'] = -1  # 卖出信号
-    data.loc[data['close'] < lower_bound, 'signal'] = 1  # 买入信号
-
-    # 计算持仓
-    data['position'] = data['signal'].diff()
-
-    # 回测交易策略
-    initial_capital = 10000
-    positions = pd.DataFrame(index=data.index).fillna(0.0)
-    positions['BTC'] = data['signal']
-
-    portfolio = positions.multiply(data['close'], axis=0)
-    pos_diff = positions.diff()
-
-    portfolio['holdings'] = (positions.multiply(data['close'], axis=0)).sum(axis=1)
-    portfolio['cash'] = initial_capital - (pos_diff.multiply(data['close'], axis=0)).sum(axis=1).cumsum()
-    portfolio['total'] = portfolio['cash'] + portfolio['holdings']
-    portfolio['returns'] = portfolio['total'].pct_change()
-
-    # 计算胜率和盈亏比
-    trades = portfolio[portfolio['position'] != 0]
-    wins = trades[trades['returns'] > 0]
-    losses = trades[trades['returns'] < 0]
-
-    win_rate = len(wins) / len(trades) if len(trades) > 0 else 0
-    risk_reward_ratio = wins['returns'].mean() / abs(losses['returns'].mean()) if len(losses) > 0 else 0
-
-    print(f"胜率: {win_rate * 100:.2f}%")
-    print(f"盈亏比: {risk_reward_ratio:.2f}")
-
-
-def do_prediction(data):
+# 新增 predict_close_prices 函数
+def predict_close_prices(data, future_hours=1, force_retrain=False):
     # 数据准备
-    X_train, X_test, y_train_high, y_test_high, y_train_low, y_test_low, y_train_close, y_test_close, scaler_high, scaler_low, scaler_close = prepare_data(
-        data)
+    X_train, X_test, y_train_close, y_test_close, scaler_features, scaler_close = prepare_data(data, future_hours)
 
-    # 构建并训练预测最高价的模型
-    model_high = build_lstm_model(X_train.shape[1:])
-    model_high.fit(X_train, y_train_high, epochs=50, batch_size=32, validation_split=0.1)
+    if force_retrain:
+        # 构建并训练预测收盘价的模型
+        model_close = build_lstm_model(X_train.shape[1:])
+        model_close.save('./data/close_price_model.keras')
+        model_close.fit(X_train, y_train_close, epochs=50, batch_size=32, validation_split=0.1)
+    else:
+        # 这里可以添加加载已有模型的逻辑，如果存在的话
+        # 示例：model_close = load_model('close_price_model.keras')
+        # 假设没有已有模型，暂时还是重新训练
+        model_close = load_model('./data/close_price_model.keras')
+        # 添加 ProgbarLogger 回调函数
+        model_close.fit(X_train, y_train_close, epochs=50, batch_size=32, validation_split=0.1)
 
-    # 构建并训练预测最低价的模型
-    model_low = build_lstm_model(X_train.shape[1:])
-    model_low.fit(X_train, y_train_low, epochs=50, batch_size=32, validation_split=0.1)
+    # 进行预测
+    predictions_close = predict_and_inverse_transform(model_close, X_test, scaler_close)
+    return predictions_close
+
+def do_prediction(data, future_hours=1):
+    # 数据准备
+    X_train, X_test, y_train_close, y_test_close, scaler_features, scaler_close = prepare_data(data, future_hours)
 
     # 构建并训练预测收盘价的模型
     model_close = build_lstm_model(X_train.shape[1:])
     model_close.fit(X_train, y_train_close, epochs=50, batch_size=32, validation_split=0.1)
 
     # 进行预测
-    predictions_high = predict_and_inverse_transform(model_high, X_test, scaler_high)
-    predictions_low = predict_and_inverse_transform(model_low, X_test, scaler_low)
     predictions_close = predict_and_inverse_transform(model_close, X_test, scaler_close)
 
-    # 计算回撤量
-    with np.errstate(divide='ignore', invalid='ignore'):
-        drawdowns = (predictions_high - predictions_low) / predictions_high
-
-    return f"预测的最高价: {predictions_high}\n\
-    预测的最低价: {predictions_low}\n\
-    预测的收盘价: {predictions_close}\n\
-    回撤量: {drawdowns}"
-
-    # # 执行区间交易策略
-    # range_trading_strategy(data)
-    
+    return f"预测未来 {future_hours} 小时的收盘价: {predictions_close}"
